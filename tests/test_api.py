@@ -158,6 +158,27 @@ def test_rate_limit(signed_bundle, keys):
         assert client.get("/healthz").status_code == 200  # probes are never throttled
 
 
+def test_rejections_carry_the_security_headers_and_are_logged(signed_bundle, keys, caplog):
+    """The size and rate limits answer before the app: their 413 and 429 must still be
+    hardened and logged (throttled clients are the scraping signal the log exists for)."""
+    caplog.set_level(logging.INFO)
+    settings = Settings(bundle=signed_bundle, public_keys=(keys.public,), rate_limit_per_minute=1)
+    with TestClient(create_app(settings)) as client:
+        too_big = post(client, {"instances": [instance()], "pad": "x" * 40_000})
+        allowed = post(client, {"instances": [instance()]})
+        throttled = post(client, {"instances": [instance()]})
+    assert [r.status_code for r in (too_big, allowed, throttled)] == [413, 200, 429]
+    for response in (too_big, throttled):
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["cache-control"] == "no-store"
+        assert len(response.headers["x-request-id"]) == 32
+    access = [r for r in caplog.records if r.name == "mlseal.access"]
+    assert [r.status for r in access] == [413, 200, 429]
+    assert [r.request_id for r in access] == [
+        r.headers["x-request-id"] for r in (too_big, allowed, throttled)
+    ]
+
+
 def test_token_bucket_refills():
     limiter = RateLimit(app=None, per_minute=60)
     assert all(limiter.allow("a", now=0.0) for _ in range(60))

@@ -9,22 +9,20 @@ is built per app, from the endpoint's real annotation.)
 """
 
 import logging
-import time
-import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 import numpy as np
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictInt, create_model
 
 from mlseal import modelfile
 from mlseal.schema import FEATURE_NAMES, FEATURES
-from mlseal.serving.middleware import BodySizeLimit, RateLimit
+from mlseal.serving.middleware import AccessLog, BodySizeLimit, RateLimit
 from mlseal.serving.settings import Settings
 from mlseal.signing import VerificationError, load_public_key, verify_bundle
 
@@ -158,30 +156,6 @@ def create_app(settings: Settings) -> FastAPI:
         openapi_url="/openapi.json" if docs else None,
     )
 
-    @app.middleware("http")
-    async def headers_and_access_log(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        request_id = uuid.uuid4().hex
-        request.state.request_id = request_id
-        start = time.perf_counter()
-        response = await call_next(request)
-        for name, value in SECURITY_HEADERS.items():
-            response.headers[name] = value
-        response.headers["X-Request-ID"] = request_id
-        access.info(
-            "request",
-            extra={
-                "request_id": request_id,
-                "method": request.method,
-                "path": request.url.path,
-                "status": response.status_code,
-                "duration_ms": round(1000 * (time.perf_counter() - start), 2),
-                **getattr(request.state, "summary", {}),
-            },
-        )
-        return response
-
     @app.exception_handler(RequestValidationError)
     async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
         # FastAPI's default echoes the offending input back; return only where and why.
@@ -247,7 +221,9 @@ def create_app(settings: Settings) -> FastAPI:
             ],
         )
 
-    # Outermost first on the wire: size limit, then rate limit, then the app.
+    # The last one added is the outermost. On the wire: headers and access log (so that the
+    # rejections below are logged too), size limit, rate limit, then the app.
     app.add_middleware(RateLimit, per_minute=settings.rate_limit_per_minute)
     app.add_middleware(BodySizeLimit, max_bytes=settings.max_body_bytes)
+    app.add_middleware(AccessLog, headers=SECURITY_HEADERS, logger=access)
     return app

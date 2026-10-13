@@ -1,10 +1,12 @@
-"""ASGI middleware: request size limit and per-client rate limiting."""
+"""ASGI middleware: security headers and access log, request size limit, per-client rate limit."""
 
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from typing import Any
 
@@ -26,6 +28,54 @@ async def _reject(send: Any, status: int, detail: str, headers: list | None = No
         }
     )
     await send({"type": "http.response.body", "body": body})
+
+
+class AccessLog:
+    """Outermost layer: security headers and one access-log line on every response.
+
+    It wraps the size and rate limits too, so their 413 and 429 rejections carry the same
+    headers and reach the log: a throttled client is exactly what the log is there to show.
+    A line holds the request id, method, path, status, latency and the counts the endpoint
+    leaves in `scope["state"]["summary"]`; never the body, query string or client address.
+    """
+
+    def __init__(self, app: Any, headers: dict[str, str], logger: logging.Logger) -> None:
+        self.app, self.logger = app, logger
+        self.headers = [(k.lower().encode(), v.encode()) for k, v in headers.items()]
+        self.names = {k for k, _ in self.headers} | {b"x-request-id"}
+
+    async def __call__(self, scope: Scope, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request_id = uuid.uuid4().hex
+        state = scope.setdefault("state", {})
+        state["request_id"] = request_id
+        start, status = time.perf_counter(), 500  # 500 unless a response starts
+
+        async def send_with_headers(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                kept = [h for h in message.get("headers", []) if h[0].lower() not in self.names]
+                headers = [*kept, *self.headers, (b"x-request-id", request_id.encode())]
+                message = {**message, "headers": headers}
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_headers)
+        finally:
+            self.logger.info(
+                "request",
+                extra={
+                    "request_id": request_id,
+                    "method": scope["method"],
+                    "path": scope["path"],
+                    "status": status,
+                    "duration_ms": round(1000 * (time.perf_counter() - start), 2),
+                    **state.get("summary", {}),
+                },
+            )
 
 
 class BodySizeLimit:
