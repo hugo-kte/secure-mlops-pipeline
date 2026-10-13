@@ -79,6 +79,7 @@ def test_workflow_is_least_privilege_and_pinned(path):
     assert doc["permissions"] == {}, "deny by default at workflow level"
     for name, job in doc["jobs"].items():
         assert "permissions" in job, f"job {name} must declare its permissions"
+        assert not job["runs-on"].endswith("-latest"), f"job {name}: pin the runner image"
         for step in job["steps"]:
             uses = step.get("uses")
             if uses is None:
@@ -98,6 +99,16 @@ def test_only_the_attestation_job_can_mint_tokens(path):
         if any(v == "write" for v in job["permissions"].values())
     }
     assert writers <= {"attest"}
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_provenance_is_attested_only_for_fully_green_builds(path):
+    doc, _ = _load(path)
+    for name, job in doc["jobs"].items():
+        if job["permissions"].get("attestations") == "write":
+            needs = job.get("needs", [])
+            needs = {needs} if isinstance(needs, str) else set(needs)
+            assert needs == set(doc["jobs"]) - {name}, f"{name} must wait for every other job"
 
 
 # --- container ------------------------------------------------------------------------------

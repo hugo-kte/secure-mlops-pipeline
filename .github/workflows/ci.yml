@@ -12,13 +12,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Every action is pinned to a full commit SHA (tags can be moved; commits cannot).
+# Every action is pinned to a full commit SHA (tags can be moved; commits cannot), and the
+# runner image to a release (the reproducibility gate must not change under a moving label).
 # Caches are disabled: nothing a pull request writes can poison a later build.
 
 jobs:
   test:
     name: Lint & test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     strategy:
@@ -49,7 +50,7 @@ jobs:
 
   pipeline:
     name: Train, gate, scan, sign, verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -97,9 +98,10 @@ jobs:
 
   attest:
     name: Attest build provenance (Sigstore, keyless)
-    needs: pipeline
+    # Provenance only for a fully green commit: every other job is a release gate.
+    needs: [test, pipeline, supply-chain, secrets, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write # OIDC token for Sigstore keyless signing; no long-lived key exists
@@ -112,14 +114,16 @@ jobs:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
-            release/bundle/model.json
             release/bundle/manifest.dsse.json
+            release/bundle/model.json
             release/bundle/metrics.json
             release/bundle/model_card.md
+            release/bundle/data_validation.json
+            release/bundle/gates.json
 
   supply-chain:
     name: Supply chain (lock, vulnerability audit, SBOM, workflow lint)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -159,7 +163,7 @@ jobs:
 
   secrets:
     name: Secret scan (gitleaks, full history)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -176,7 +180,7 @@ jobs:
   docker:
     name: Container (build, hardened run, refuse a tampered bundle)
     needs: pipeline
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
