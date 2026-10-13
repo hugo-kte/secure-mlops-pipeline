@@ -246,3 +246,9 @@ committed unmodified (renamed only) with its SHA-256 pinned; see [`data/README.m
 
 > Mohammad, R. & McCluskey, L. (2012). Phishing Websites [Dataset]. UCI Machine Learning
 > Repository. https://doi.org/10.24432/C51W2X
+
+<!-- portfolio-footer -->
+
+---
+
+<sub>Part of a cybersecurity & AI engineering portfolio: [FlowGuard](https://github.com/hugo-kte/flowguard-nids) (network IDS) · [Detection-as-code](https://github.com/hugo-kte/detection-as-code) (Sigma rules) · [Insider-threat UEBA](https://github.com/hugo-kte/insider-threat-ueba) · [AlertLens](https://github.com/hugo-kte/alertlens) (SOC triage) · [PromptWall](https://github.com/hugo-kte/promptwall) (LLM firewall) · **MLSeal (secure MLOps)** · [Gleaner](https://github.com/hugo-kte/cti-to-stix) (CTI to STIX).</sub>
