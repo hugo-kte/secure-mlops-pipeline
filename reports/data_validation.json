@@ -1,0 +1,83 @@
+{
+  "path": "data/phishing_websites.arff",
+  "sha256": "3bcf93b1612306537ee2737751f1bac185b2a77886ab376644c3bf0c7f7cb3e6",
+  "passed": true,
+  "checks": [
+    {
+      "name": "integrity",
+      "passed": true,
+      "detail": "SHA-256 matches the pinned digest",
+      "observed": null,
+      "limit": null
+    },
+    {
+      "name": "parse",
+      "passed": true,
+      "detail": "11055 rows, 31 columns",
+      "observed": null,
+      "limit": null
+    },
+    {
+      "name": "schema",
+      "passed": true,
+      "detail": "31 attributes match the contract",
+      "observed": null,
+      "limit": null
+    },
+    {
+      "name": "allowed_values",
+      "passed": true,
+      "detail": "every value is in its declared domain",
+      "observed": 0,
+      "limit": null
+    },
+    {
+      "name": "row_count",
+      "passed": true,
+      "detail": "rows: 11055 (allowed 10000..50000)",
+      "observed": 11055,
+      "limit": [
+        10000,
+        50000
+      ]
+    },
+    {
+      "name": "label_balance",
+      "passed": true,
+      "detail": "phishing share: 0.443057 (allowed 0.35..0.55)",
+      "observed": 0.44305744007236547,
+      "limit": [
+        0.35,
+        0.55
+      ]
+    },
+    {
+      "name": "duplicates",
+      "passed": true,
+      "detail": "duplicate rows: 0.4767 (max 0.6)",
+      "observed": 0.4767073722297603,
+      "limit": 0.6
+    },
+    {
+      "name": "label_conflicts",
+      "passed": true,
+      "detail": "64 vectors carry both labels, share: 0.0111 (max 0.02)",
+      "observed": 0.011063094209161625,
+      "limit": 0.02
+    },
+    {
+      "name": "feature_drift",
+      "passed": true,
+      "detail": "max PSI vs reference (having_IP_Address): 0.0000 (max 0.1)",
+      "observed": 0.0,
+      "limit": 0.1
+    },
+    {
+      "name": "train_test_overlap",
+      "passed": true,
+      "detail": "0 feature vectors appear in both train and test",
+      "observed": 0,
+      "limit": 0
+    }
+  ]
+}

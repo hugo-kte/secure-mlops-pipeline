@@ -1,0 +1,31 @@
+{
+  "passed": true,
+  "baseline": null,
+  "results": [
+    {
+      "name": "min_roc_auc",
+      "passed": true,
+      "detail": "roc_auc 0.9945 (floor 0.9800)"
+    },
+    {
+      "name": "min_f1",
+      "passed": true,
+      "detail": "f1 0.9674 (floor 0.9300)"
+    },
+    {
+      "name": "min_recall",
+      "passed": true,
+      "detail": "recall 0.9731 (floor 0.9200)"
+    },
+    {
+      "name": "export_parity",
+      "passed": true,
+      "detail": "JSON runtime vs scikit-learn max |\u0394p| 3.3e-16 (max 1e-09)"
+    },
+    {
+      "name": "regression",
+      "passed": true,
+      "detail": "no baseline yet: first release"
+    }
+  ]
+}
