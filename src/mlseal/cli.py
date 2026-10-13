@@ -150,6 +150,8 @@ def scan(
     from mlseal.scanner import scan_path
 
     reports = [r for p in paths for r in scan_path(p)]
+    if not reports:
+        raise _fail("no files to scan")  # an empty scan must not pass as a clean one
     table = Table(title="Model file scan", title_justify="left")
     for col in ("file", "kind", "verdict", "findings"):
         table.add_column(col)
@@ -201,7 +203,7 @@ def sign(
             raise _fail(f"{label} did not pass; refusing to sign")
     pickles = [r.path for r in scan_path(bundle) if r.is_pickle]
     if pickles:
-        raise _fail(f"pickle files in the bundle: {pickles}")
+        raise _fail(f"pickles, or files the scanner refused, in the bundle: {pickles}")
     modelfile.loads((bundle / "model.json").read_bytes())  # never sign an unloadable model
     try:
         statement = build_statement(bundle)

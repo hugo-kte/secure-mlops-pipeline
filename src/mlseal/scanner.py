@@ -140,8 +140,8 @@ _MARK = _Mark()
 _UNKNOWN = object()
 
 
-def _scan_stream(data: bytes, member: str | None, report: ScanReport) -> None:
-    """Scan one or more concatenated pickles in `data`."""
+def _scan_stream(data: bytes, member: str | None, report: ScanReport) -> bool:
+    """Scan one or more concatenated pickles in `data`; False if the stream did not parse."""
     pos = 0
     while pos < len(data):
         stack: list[object] = []
@@ -154,13 +154,14 @@ def _scan_stream(data: bytes, member: str | None, report: ScanReport) -> None:
             report.findings.append(
                 Finding(Severity.HIGH, f"unparseable pickle stream: {exc}", member)
             )
-            return
+            return False
         consumed = stream.tell()
         if consumed == 0:
-            return
+            return True
         pos += consumed
         if not data[pos:].strip(b"\x00\r\n\t "):
-            return
+            return True
+    return True
 
 
 def _record(module: object, name: object, member: str | None, report: ScanReport) -> None:
@@ -259,8 +260,34 @@ def _decompress(data: bytes) -> tuple[str, bytes] | None:
     return None
 
 
-# Protocols 0-1 have no header; their streams start with one of these opcodes.
-_PROTO0_START = frozenset(b"(]}cIJKLNSVFGTUX")
+# Every opcode that needs nothing on the stack can open a stream. The PROTO header is
+# optional (`pickle.loads` accepts protocol 2-5 opcodes without it), so this is the set,
+# not just b"\x80" plus the protocol-0 opcodes.
+_PICKLE_START = frozenset(
+    op.code.encode("latin-1")[0] for op in pickletools.opcodes if not op.stack_before
+)
+
+
+def _scan_candidate(data: bytes, member: str | None, report: ScanReport, strict: bool) -> bool:
+    """Scan `data` if it is, or may be, a pickle; return whether it was treated as one.
+
+    With a pickle file extension (`strict`) or a protocol header, any parse failure is a
+    finding. Otherwise the bytes might be text that happens to start with an opcode, so they
+    count as a pickle only if they parse, or reveal a global or an extension code first.
+    """
+    if strict or data[:1] == b"\x80":
+        _scan_stream(data, member, report)
+        return True
+    if not data or data[0] not in _PICKLE_START:
+        return False
+    trial = ScanReport(path=report.path, kind=report.kind)
+    parsed = _scan_stream(data, member, trial)
+    revealing = trial.globals or any(f.severity is Severity.CRITICAL for f in trial.findings)
+    if not parsed and not revealing:
+        return False
+    report.globals += trial.globals
+    report.findings += trial.findings
+    return True
 
 
 def _scan_members(data: bytes, report: ScanReport) -> None:
@@ -276,8 +303,7 @@ def _scan_members(data: bytes, report: ScanReport) -> None:
                 content = _read_capped(fh, min(MAX_SCAN_BYTES, budget))
             budget -= len(content)
             name = info.filename
-            if Path(name).suffix.lower() in PICKLE_SUFFIXES or content[:1] == b"\x80":
-                _scan_stream(content, name, report)
+            _scan_candidate(content, name, report, Path(name).suffix.lower() in PICKLE_SUFFIXES)
 
 
 def scan_bytes(data: bytes, path: str = "<memory>") -> ScanReport:
@@ -293,15 +319,7 @@ def scan_bytes(data: bytes, path: str = "<memory>") -> ScanReport:
         if unpacked is not None:
             report.kind = f"{unpacked[0]}+pickle"
             data, strict = unpacked[1], True
-        if data[:1] == b"\x80" or strict:
-            _scan_stream(data, None, report)
-        elif data[:1] and data[0] in _PROTO0_START:
-            # Could be a protocol-0 pickle or just text. Keep it only if it parses as a
-            # pickle or reveals a global before failing.
-            _scan_stream(data, None, report)
-            if not report.globals and not report.safe:
-                report.kind, report.findings = "not-pickle", []
-        else:
+        if not _scan_candidate(data, None, report, strict):
             report.kind = "not-pickle"
     except Exception as exc:  # corrupt archive, decompression bomb, ...: fail closed
         report.kind = "error"
@@ -309,18 +327,32 @@ def scan_bytes(data: bytes, path: str = "<memory>") -> ScanReport:
     return report
 
 
+def _refused(path: Path, reason: str) -> ScanReport:
+    report = ScanReport(path=str(path), kind="error")
+    report.findings.append(Finding(Severity.HIGH, reason))
+    return report
+
+
 def scan_path(path: Path) -> list[ScanReport]:
-    """Scan a file, or every file under a directory (symlinks are not followed)."""
+    """Scan a file, or every file under a directory.
+
+    Fails closed on what it cannot see: a missing path, and symbolic links inside a
+    directory, are refused rather than skipped (a loader would follow the link to content
+    the scan never read).
+    """
     path = Path(path)
-    files = sorted(p for p in path.rglob("*") if p.is_file() and not p.is_symlink())
     if path.is_file():
         files = [path]
+    elif path.is_dir():
+        files = sorted(p for p in path.rglob("*") if p.is_symlink() or p.is_file())
+    else:
+        return [_refused(path, "no such file or directory")]
     reports = []
     for file in files:
-        if file.stat().st_size > MAX_SCAN_BYTES:
-            report = ScanReport(path=str(file), kind="error")
-            report.findings.append(Finding(Severity.HIGH, "file too large to scan"))
-            reports.append(report)
-            continue
-        reports.append(scan_bytes(file.read_bytes(), str(file)))
+        if file.is_symlink() and file != path:
+            reports.append(_refused(file, "symbolic link not followed (scan its target)"))
+        elif file.stat().st_size > MAX_SCAN_BYTES:
+            reports.append(_refused(file, "file too large to scan"))
+        else:
+            reports.append(scan_bytes(file.read_bytes(), str(file)))
     return reports

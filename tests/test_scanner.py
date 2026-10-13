@@ -11,6 +11,7 @@ import io
 import pickle
 import sys
 import zipfile
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -133,10 +134,41 @@ def test_truncated_pickle_fails_closed():
 
 
 def test_text_files_are_not_mistaken_for_pickles():
-    for text in (b"Introduction\nThis is a README.\n", b'{"format": "x"}', b"# Title\n"):
+    texts = (
+        b"Introduction\nThis is a README.\n",
+        b'{"format": "x"}',
+        b"# Title\n",
+        b"Python 3.12\nnotes\n",  # starts with an opcode that records a persistent id
+        b"Makefile targets\n",
+        b"(see below)\n",
+        b"plain words\n",
+    )
+    for text in texts:
         report = scan_bytes(text, "notes.txt")
-        assert report.kind == "not-pickle"
+        assert report.kind == "not-pickle", text
         assert report.safe
+
+
+@pytest.mark.parametrize("protocol", [2, 3, 4, 5])
+def test_pickles_without_a_protocol_header_are_scanned(protocol):
+    """`pickle.loads` does not require the PROTO opcode; neither a missing header nor an
+    innocent file name may turn a pickle into "not a pickle"."""
+    raw = pickle.dumps(CallsPrint(), protocol)
+    assert raw[:1] == b"\x80"
+    report = scan_bytes(raw[2:], "weights.dat")  # PROTO dropped; protocol 4+ opens with FRAME
+    assert report.kind == "pickle"
+    assert any(g.endswith(".print") for g in report.globals)  # __builtin__ in protocol 2-3
+    assert not report.safe
+
+
+def test_pickles_inside_zip_members_without_a_pickle_name_are_scanned():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("archive/data/0", pickle.dumps(CallsLen(), 4)[2:])  # header-less
+        zf.writestr("archive/byteorder", b"little")
+    report = scan_bytes(buf.getvalue(), "checkpoint.pt")
+    assert not report.safe
+    assert report.findings[0].member == "archive/data/0"
 
 
 def test_pickles_inside_zip_archives_are_scanned():
@@ -163,18 +195,32 @@ def test_decompression_bomb_is_refused(monkeypatch):
     assert not report.safe
 
 
-def test_scan_path_walks_directories_without_following_symlinks(tmp_path):
-    (tmp_path / "model.json").write_text("{}")
-    (tmp_path / "sub").mkdir()
-    (tmp_path / "sub" / "model.pkl").write_bytes(pickle.dumps(CallsPrint()))
-    (tmp_path / "link.pkl").symlink_to(tmp_path / "sub" / "model.pkl")
-    reports = {r.path: r for r in scan_path(tmp_path)}
-    assert set(reports) == {str(tmp_path / "model.json"), str(tmp_path / "sub" / "model.pkl")}
-    assert not reports[str(tmp_path / "sub" / "model.pkl")].safe
+def test_scan_path_refuses_symlinks_instead_of_following_them(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "model.pkl").write_bytes(pickle.dumps(CallsPrint()))
+    scanned = tmp_path / "scanned"
+    (scanned / "sub").mkdir(parents=True)
+    (scanned / "model.json").write_text("{}")
+    (scanned / "sub" / "ok.pkl").write_bytes(pickle.dumps(collections.OrderedDict(a=1)))
+    (scanned / "link.pkl").symlink_to(outside / "model.pkl")  # a loader would follow it
+    reports = {Path(r.path).name: r for r in scan_path(scanned)}
+    assert set(reports) == {"model.json", "ok.pkl", "link.pkl"}
+    assert reports["ok.pkl"].safe
+    assert not reports["link.pkl"].safe
+    assert "symbolic link" in reports["link.pkl"].findings[0].message
+    assert reports["link.pkl"].globals == []  # refused unread, not scanned through the link
+
+
+def test_scan_path_refuses_a_missing_path(tmp_path):
+    (report,) = scan_path(tmp_path / "typo")
+    assert not report.safe
 
 
 def test_scan_command_exit_codes(tmp_path):
     runner = CliRunner()
+    assert runner.invoke(app, ["scan", str(tmp_path)]).exit_code == 1  # nothing scanned
+    assert runner.invoke(app, ["scan", str(tmp_path / "typo")]).exit_code == 1
     (tmp_path / "model.json").write_text("{}")
     assert runner.invoke(app, ["scan", str(tmp_path)]).exit_code == 0
     (tmp_path / "ok.pkl").write_bytes(pickle.dumps(collections.OrderedDict(a=1)))
