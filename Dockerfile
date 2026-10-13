@@ -14,7 +14,7 @@ FROM ${PYTHON_IMAGE} AS build
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore
 COPY requirements/serve.txt /tmp/serve.txt
 # Every package is pinned and hash-checked; wheels only, so no build script ever runs.
-# The virtualenv gets no pip of its own: nothing in the runtime image can install packages.
+# The virtualenv gets no pip of its own (and the runtime stage drops the base image's).
 RUN python -m venv --without-pip /opt/venv \
     && python -m pip --python /opt/venv/bin/python install \
         --require-hashes --only-binary=:all: --no-deps -r /tmp/serve.txt
@@ -30,7 +30,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MLSEAL_PUBLIC_KEY=/keys/signing.pub
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build /opt/app /opt/app
-RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin mlseal
+# The base image's pip goes too: no package installer is left in the image (and no pip
+# release for image scanners to flag).
+RUN /usr/local/bin/python -m pip uninstall --yes --no-input --disable-pip-version-check \
+        --root-user-action=ignore pip \
+    && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin mlseal
 USER 10001:10001
 EXPOSE 8080
 # Liveness only; readiness (/readyz) is true once the bundle is verified and loaded.
