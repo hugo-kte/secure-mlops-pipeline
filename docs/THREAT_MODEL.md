@@ -252,13 +252,16 @@ Implemented ([`serving/`](../src/mlseal/serving)), tested in
   allowlist.
 * JSON only (415 otherwise); body capped at 32 KiB before parsing, whether Content-Length is
   honest, missing (chunked) or invalid; at most 32 instances per request.
-* Per-client token-bucket rate limit (bounded memory), uvicorn concurrency limit, short
-  keep-alive, capped header size.
+* Token-bucket rate limit per client, keyed on the IPv4 address or the IPv6 /64 prefix (one
+  IPv6 subscriber usually holds a whole /64, which per-address buckets would let it rotate
+  through); bounded memory; uvicorn concurrency limit, short keep-alive, capped header size.
 * Validation errors say where and why, never echo the input; interactive docs and the
   OpenAPI schema are disabled; no debug mode; no server header; `nosniff`, `no-store` and a
   deny-all CSP on every response, including the size and rate-limit rejections.
 
-Residual risk: the rate limiter is per process. Volumetric attacks belong to the gateway.
+Residual risk: the rate limiter is per process and keys on the TCP peer (forwarded headers
+are not trusted), so behind a reverse proxy it limits the proxy as a whole. Per-client quotas
+across replicas and volumetric attacks belong to the gateway.
 
 ### T9 Model extraction, inversion and membership inference
 

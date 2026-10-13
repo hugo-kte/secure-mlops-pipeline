@@ -22,7 +22,7 @@ class Settings:
     public_keys: tuple[Path, ...]
     max_body_bytes: int = 32 * 1024  # 32 instances are ~23 KiB
     max_batch: int = 32
-    rate_limit_per_minute: int = 600  # per client address; 0 disables
+    rate_limit_per_minute: int = 600  # per IPv4 address or IPv6 /64; 0 disables
     enable_docs: bool = False
 
     @classmethod

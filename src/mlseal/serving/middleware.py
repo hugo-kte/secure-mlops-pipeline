@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import threading
@@ -125,8 +126,24 @@ class BodySizeLimit:
         await self.app(scope, replay, send)
 
 
+def client_key(host: str) -> str:
+    """Rate-limit bucket for a peer: its IPv4 address, or its IPv6 /64 prefix.
+
+    One IPv6 subscriber usually holds a whole /64, so a bucket per address would hand a
+    single client 2^64 fresh quotas. IPv4-mapped IPv6 addresses count as IPv4; anything that
+    is not an IP address (a Unix socket peer, a test client) is used as given.
+    """
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if ip.version == 6 and ip.ipv4_mapped is None:
+        return f"{ipaddress.IPv6Address(int(ip) >> 64 << 64)}/64"  # drops any zone id
+    return str(ip.ipv4_mapped if ip.version == 6 else ip)
+
+
 class RateLimit:
-    """Token bucket per client address: a cheap brake on scraping and model extraction.
+    """Token bucket per client (`client_key`): a cheap brake on scraping and extraction.
 
     In-process only; a deployment with several replicas enforces quotas at the gateway too.
     The number of tracked clients is bounded so the limiter itself cannot exhaust memory.
@@ -155,7 +172,7 @@ class RateLimit:
         if scope["type"] != "http" or self.capacity <= 0 or not scope["path"].startswith("/v1/"):
             await self.app(scope, receive, send)
             return
-        client = (scope.get("client") or ("unknown", 0))[0]
+        client = client_key((scope.get("client") or ("unknown", 0))[0])
         if not self.allow(client):
             await _reject(send, 429, "rate limit exceeded", [(b"retry-after", b"1")])
             return

@@ -112,10 +112,10 @@ flowchart LR
   signature and every digest, then parses the exact bytes it verified; any failure stops the
   process. Requests must match the 30-feature contract exactly (strict integers in each
   feature's allowed set; unknown fields, `true`, `1.0` and `"1"` are rejected), bodies are
-  capped at 32 KiB even when chunked, batches at 32, and clients are rate-limited. Errors
-  never echo the input; every response, the 413 and 429 rejections included, gets the
-  security headers and a JSON access-log line without payload or client address; the
-  interactive docs are disabled.
+  capped at 32 KiB even when chunked, batches at 32, and clients are rate-limited (per IPv4
+  address or IPv6 /64). Errors never echo the input; every response, the 413 and 429
+  rejections included, gets the security headers and a JSON access-log line without payload
+  or client address; the interactive docs are disabled.
 
 ## Evaluation protocol
 

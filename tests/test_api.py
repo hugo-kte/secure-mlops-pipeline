@@ -14,7 +14,7 @@ from mlseal.data import read_arff
 from mlseal.schema import FEATURE_NAMES
 from mlseal.serving import Settings, create_app
 from mlseal.serving.logs import JsonFormatter
-from mlseal.serving.middleware import AccessLog, RateLimit
+from mlseal.serving.middleware import AccessLog, RateLimit, client_key
 from mlseal.signing import VerificationError, generate_key, save_keypair
 
 ROWS = read_arff(DATA).X[:40]
@@ -196,6 +196,42 @@ def test_access_log_status_when_the_app_fails_or_the_client_leaves(caplog):
         asyncio.run(run(fails))
     asyncio.run(run(client_left))
     assert [r.status for r in caplog.records if r.name == "mlseal.access"] == [500, None]
+
+
+@pytest.mark.parametrize(
+    ("host", "key"),
+    [
+        ("203.0.113.7", "203.0.113.7"),  # IPv4: one bucket per address, unchanged
+        ("2001:db8:1:2:aaaa::1", "2001:db8:1:2::/64"),
+        ("2001:DB8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2::/64"),  # same /64, same bucket
+        ("::ffff:203.0.113.7", "203.0.113.7"),  # IPv4-mapped counts as IPv4
+        ("fe80::1%eth0", "fe80::/64"),
+        ("testclient", "testclient"),  # not an IP address: used as given
+    ],
+)
+def test_rate_limit_key(host, key):
+    assert client_key(host) == key
+
+
+def test_ipv6_clients_share_a_bucket_per_64_prefix():
+    """Rotating through a /64 must not mint fresh quotas; other prefixes and IPv4 peers keep
+    their own buckets."""
+    served, statuses = [], []
+
+    async def app(scope, receive, send):
+        served.append(scope["client"][0])
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            statuses.append(message["status"])
+
+    limiter = RateLimit(app, per_minute=1)
+    hosts = ["2001:db8:1:2::1", "2001:db8:1:2:dead:beef::9", "2001:db8:1:3::1", "203.0.113.7"]
+    for host in [*hosts, "203.0.113.8"]:
+        scope = {"type": "http", "path": "/v1/predict", "client": (host, 50000)}
+        asyncio.run(limiter(scope, None, send))
+    assert served == ["2001:db8:1:2::1", "2001:db8:1:3::1", "203.0.113.7", "203.0.113.8"]
+    assert statuses == [429]  # the second address of the first /64
 
 
 def test_token_bucket_refills():
