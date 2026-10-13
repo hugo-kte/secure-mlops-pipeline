@@ -31,11 +31,11 @@ At the 0.5 threshold: 579 of 595 phishing pages caught, 23 of 560 legitimate pag
 logistic-regression baseline reaches ROC-AUC 0.976 and F1 0.921 on the same test set.
 
 **The dataset hides a trap.** Of its 11,055 rows only 5,785 feature vectors are distinct:
-47.7% of rows repeat an earlier row, and 64 vectors carry both labels. With the row-level
-split most papers use, 65% of test rows have an identical twin in training, and the error
-rate looks 22% lower than it is (3.4% vs 4.4% when identical vectors are kept on one side of
-the split). MLSeal de-duplicates before splitting and a data gate fails on any train/test
-overlap.
+47.7% of rows repeat an earlier row, and 64 vectors carry both labels. With a plain
+row-level split, 65% of test rows have an identical twin in training, and the error rate
+looks 22% lower than it is (3.4% vs 4.4% when identical vectors are kept on one side of the
+split; 5-fold CV, same model). MLSeal de-duplicates before splitting and a data gate fails on
+any train/test overlap.
 
 ![Effect of duplicates](reports/figures/duplicates_effect.png)
 
@@ -43,15 +43,17 @@ overlap.
 
 ## What the pipeline enforces
 
-Every row is a CI step that fails the build; each has negative tests that show it firing.
+Every row is a CI step that fails the build. The controls implemented here have negative
+tests that show them firing; the third-party scanners (pip-audit, zizmor, gitleaks) run as
+configured.
 
 | Gate | Checks | Threat it addresses |
 |---|---|---|
 | Data gate | SHA-256 pin of the dataset, schema and allowed values, row count, label balance, contradictory duplicates, per-feature drift (PSI) vs a reviewed profile, zero train/test overlap | Data poisoning, swapped or truncated data, evaluation leakage |
-| Quality gates | Metric floors (ROC-AUC ≥ 0.98, F1 ≥ 0.93, recall ≥ 0.92), maximum regression vs the approved baseline, JSON-runtime parity with scikit-learn (≤ 1e-9), exact reproduction of the committed report | Silent model degradation, stale or hand-edited reports |
-| Model file scan | No pickle in the release bundle; static opcode scan of any pickle (non-allowlisted imports, unresolvable names, unparseable streams refused) | Code execution through malicious model files |
-| Sign and verify | Ed25519 signature over an in-toto manifest of every bundle file; tampering test (a modified bundle must be refused) | Model tampering between build and deployment |
-| Attestation (`main`) | Sigstore-signed SLSA build provenance for the bundle (GitHub artifact attestations, no long-lived key) | Unknown provenance, stolen signing keys |
+| Quality gates | Metric floors (ROC-AUC ≥ 0.98, F1 ≥ 0.93, recall ≥ 0.92), maximum regression vs the approved baseline, JSON-runtime parity with scikit-learn (≤ 1e-9), a fresh retrain reproducing every value of the committed report (≤ 1e-6) | Silent model degradation, stale or hand-edited reports |
+| Model file scan | No pickle in the release bundle; static opcode scan of any pickle (non-allowlisted imports, unresolvable names and unparseable streams refused, with or without a protocol header) | Code execution through malicious model files |
+| Sign and verify | Ed25519 signature over an in-toto manifest of every bundle file; a modified bundle, or one carrying a file the manifest does not list, is refused | Model tampering between build and deployment |
+| Attestation (`main`) | Sigstore-signed SLSA build provenance for every bundle file, only once every other job has passed (GitHub artifact attestations, no long-lived key) | Unknown provenance, stolen signing keys |
 | Supply chain | `uv.lock` and the image requirements in sync, pip-audit on every locked package, CycloneDX SBOMs (dependencies and image), zizmor on the workflows | Vulnerable or compromised dependencies, unsafe CI configuration |
 | Secrets | gitleaks over the full git history | Leaked keys and tokens |
 | Container | Build from a digest-pinned base with hash-checked wheels, run read-only, non-root, all capabilities dropped; readiness, prediction, Docker health check; a tampered bundle must stop the container | Runtime compromise, unverified models in production |
@@ -89,26 +91,30 @@ flowchart LR
 * **Safe model format** ([`modelfile.py`](src/mlseal/modelfile.py)). The model is exported to
   plain JSON (246 KB): numbers and short strings under a closed schema, trees that provably
   terminate, NaN and duplicate keys rejected. A numpy runtime evaluates it and must match
-  scikit-learn on all 5,772 distinct vectors (observed max |Δp| 3.3e-16). The serving path
-  never imports pickle, joblib or scikit-learn (an AST test enforces it), and the container
-  does not even contain them.
+  scikit-learn on all 5,772 distinct vectors (observed max |Δp| 3.3e-16). MLSeal's serving
+  code never imports pickle, joblib or scikit-learn (an AST test enforces it), and the
+  container has no joblib or scikit-learn at all.
 * **Pickle scanner** ([`scanner.py`](src/mlseal/scanner.py)). For the third-party model files
   a team will eventually be handed: walks the opcode stream with `pickletools`, replays
   enough of the stack to resolve every imported name (memoized strings included) and refuses
-  anything not allowlisted, unresolvable or unparseable. Zip containers (PyTorch layout) and
-  compressed pickles are unpacked under size limits. It never unpickles.
+  anything not allowlisted, unresolvable or unparseable, including streams without a
+  protocol header (which `pickle.loads` accepts). Zip containers (PyTorch layout) and
+  compressed pickles are unpacked under size limits; symbolic links are refused, not
+  followed. It never unpickles.
 * **Provenance and signing** ([`provenance.py`](src/mlseal/provenance.py),
   [`signing.py`](src/mlseal/signing.py)). The manifest is an in-toto v1 Statement: the
   SHA-256 of each bundle file, plus the digests of the dataset, lock file and config (checked
   again at signing time), the commit, builder, evaluation and gate outcomes. It is signed
   with Ed25519 in a DSSE envelope. `mlseal sign` refuses a bundle that failed a gate,
-  contains a pickle or does not load.
+  contains a pickle or does not load; verification refuses a bundle holding any file the
+  manifest does not list.
 * **Hardened serving** ([`serving/`](src/mlseal/serving)). At startup the server verifies the
   signature and every digest, then parses the exact bytes it verified; any failure stops the
   process. Requests must match the 30-feature contract exactly (strict integers in each
   feature's allowed set; unknown fields, `true`, `1.0` and `"1"` are rejected), bodies are
   capped at 32 KiB even when chunked, batches at 32, and clients are rate-limited. Errors
-  never echo the input, logs are JSON without payloads or client addresses, and the
+  never echo the input; every response, the 413 and 429 rejections included, gets the
+  security headers and a JSON access-log line without payload or client address; the
   interactive docs are disabled.
 
 ## Evaluation protocol
@@ -128,13 +134,14 @@ flowchart LR
 7. Duplicate analysis: the same model under row-level, grouped and de-duplicated 5-fold CV
    (figure above).
 
-**Reproducibility.** A retrain in a Linux container reproduced all 1,599 floating-point
-values of the macOS `metrics.json` exactly, and in CI the `reproducible` gate fails if a
-fresh retrain drifts from the committed report by more than 1e-6. On Linux the build was
-byte-identical across machines: a local container and the GitHub runner produced the same
-`model.json` (`sha256:b0d29188…`). Across operating systems it is not: tied splits resolve
+**Reproducibility.** The committed `metrics.json` comes from a macOS run. On every push, CI
+retrains from scratch on Linux and the `reproducible` gate compares every value of the report
+(1,601 floating-point numbers plus the counts and labels; only provenance, the environment
+and the model file's bytes are exempt) with a tolerance of 1e-6: so far every value matches
+exactly. The model file is byte-identical across Linux machines (every CI run produces
+`model.json` `sha256:b0d29188…`) but not across operating systems: tied splits resolve
 differently at the last floating-point bit, yet predictions agree to 1e-15 on 200,000 random
-valid inputs. The gate therefore compares metrics, not file hashes.
+valid inputs. The gate therefore compares the report, not file hashes.
 
 ## Quickstart
 
@@ -172,14 +179,19 @@ Verify a bundle built by CI (artifact `release-bundle` of a run on `main`):
 
 ```bash
 gh run download <run-id> --repo hugo-kte/secure-mlops-pipeline -n release-bundle -D release
-gh attestation verify release/bundle/model.json --repo hugo-kte/secure-mlops-pipeline
+gh attestation verify release/bundle/manifest.dsse.json --repo hugo-kte/secure-mlops-pipeline \
+  --signer-workflow hugo-kte/secure-mlops-pipeline/.github/workflows/ci.yml \
+  --source-ref refs/heads/main --deny-self-hosted-runners
 mlseal verify --bundle release/bundle --public-key release/signing.pub
 ```
 
-The first check proves the file was built by this repository's workflow on `main` (SLSA
-provenance, Sigstore, transparency log); the second checks the signed manifest and every
-digest. The public key shipped with a CI bundle is ephemeral, so it only proves integrity
-within that run; long-lived trust comes from the attestation.
+The first check proves that the manifest was produced by this repository's CI workflow, from
+`main`, on a GitHub-hosted runner (SLSA provenance, Sigstore, transparency log); `--repo`
+alone would accept any workflow and any branch of the repository. The second checks the
+manifest's signature, that every bundle file matches its digest and that nothing else is in
+the bundle. Attest the manifest, not just one file: the public key shipped with a CI bundle
+is ephemeral and unattested, so it only proves integrity within that run; the trust comes
+from the attestation.
 
 API: `GET /healthz` (liveness), `GET /readyz` (bundle verified and loaded), `GET /v1/model`
 (verified digest, signer, commit, evaluation), `POST /v1/predict`. Server settings come from

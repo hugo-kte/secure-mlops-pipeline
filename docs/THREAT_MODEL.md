@@ -110,8 +110,10 @@ of test rows' exact twins in the training set.
 
 Implemented: de-duplication before splitting, a gate that fails on any train/test overlap,
 model selection by cross-validation on the training split only, confidence intervals, and a
-CI gate that retrains from scratch and must reproduce the committed report
-([`pipeline.py`](../src/mlseal/pipeline.py), [`gates.py`](../src/mlseal/gates.py)).
+CI gate that retrains from scratch and must reproduce every value of the committed report,
+intervals and figure data included, not just the headline metrics
+([`pipeline.py`](../src/mlseal/pipeline.py), [`gates.py`](../src/mlseal/gates.py)). A
+policy test requires the committed model card to be exactly what that report renders to.
 
 ### T3 Model tampering
 
@@ -129,15 +131,16 @@ Implemented ([`provenance.py`](../src/mlseal/provenance.py),
   contains any pickle, or whose model does not load.
 * The server verifies before it parses: trusted signature, then every digest, reading each
   file once into memory so the verified bytes are the parsed bytes (no TOCTOU). Symlinked
-  subjects, path-like subject names, duplicate JSON keys and a statement that does not cover
-  `model.json` are refused, and so is a validly signed statement whose recorded gate outcomes
-  are not all "passed" (the server does not assume every signer used `mlseal sign`). Any
-  failure stops startup; the container exits.
-* On `main`, CI also attests the bundle with GitHub artifact attestations (Sigstore keyless,
-  recorded in the public transparency log).
+  or non-regular subjects, path-like subject names, duplicate JSON keys, a statement that
+  does not cover `model.json` and any file in the bundle that the manifest does not list are
+  refused, and so is a validly signed statement whose recorded gate outcomes are not all
+  "passed" (the server does not assume every signer used `mlseal sign`). Any failure stops
+  startup; the container exits.
+* On `main`, once every other CI job has passed, CI also attests every bundle file with
+  GitHub artifact attestations (Sigstore keyless, recorded in the public transparency log).
 
 Tested in [`test_signing.py`](../tests/test_signing.py) (every bundle file modified, wrong
-key, unsigned, symlink, re-signed but invalid statements),
+key, unsigned, symlink, FIFO, unlisted extra file, re-signed but invalid statements),
 [`test_api.py`](../tests/test_api.py) (the app refuses to start) and in CI's `docker` job (a
 tampered bundle makes the real container exit non-zero).
 
@@ -159,14 +162,19 @@ Implemented:
   duplicate keys rejected) and tree structures that provably terminate (every child index is
   greater than its parent's, every node has exactly one parent). A numpy runtime evaluates
   it; parity with scikit-learn is a release gate (max |Δp| ≤ 1e-9, observed ~3e-16).
-* The serving path never imports a deserialiser: an AST test forbids pickle, joblib, dill,
-  cloudpickle, skops, shelve, marshal, scikit-learn and torch in those modules, and a runtime
-  test checks the training stack is never loaded. The container does not even ship them.
+* MLSeal's serving modules never import a deserialiser: an AST test forbids pickle, joblib,
+  dill, cloudpickle, skops, shelve, marshal, scikit-learn, torch and pandas in them, and a
+  runtime test checks the training stack is never loaded. (numpy imports the standard
+  library's `pickle` module itself; nothing on the serving path calls it.) The container
+  ships none of the third-party deserialisers.
 * A static pickle scanner ([`scanner.py`](../src/mlseal/scanner.py)) for third-party files:
   walks the opcode stream with `pickletools`, resolves every imported global (including names
   assembled from memoized strings) and fails closed on anything non-allowlisted,
-  unresolvable or unparseable. It handles zip containers (PyTorch layout) and compressed
-  pickles, with decompression-bomb limits. A release bundle may contain no pickle at all.
+  unresolvable or unparseable. Streams without a protocol header (which `pickle.loads`
+  accepts) and archive members with innocent names are scanned too; symbolic links, missing
+  paths and an empty scan are refused rather than skipped. It handles zip containers
+  (PyTorch layout) and compressed pickles, with decompression-bomb limits. A release bundle
+  may contain no pickle at all.
 
 Residual risk: the scanner is a gate for files you choose to inspect, not a sandbox. Formats
 it cannot fully parse (joblib files with raw array blocks) are refused rather than analysed.
@@ -189,7 +197,8 @@ Implemented:
 * `pip-audit` checks every locked package against the PyPI and OSV advisory databases on
   every CI run.
 * CycloneDX SBOMs: the serving dependencies (`cyclonedx-py`) and the built image (Syft).
-* Minimal runtime: 24 packages in the image, no scikit-learn, scipy, pandas or joblib.
+* Minimal runtime: 23 packages in the image, no scikit-learn, scipy, pandas or joblib, and no
+  pip.
 
 Residual risk: a malicious release older than the cooldown and unknown to advisories; trust
 in the index at lock time. There is no automated update bot; pins move by a reviewed
@@ -202,9 +211,12 @@ in the index at lock time. There is no automated update bot; pins move by a revi
 Implemented in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), with the rules
 themselves enforced by [`test_policies.py`](../tests/test_policies.py):
 
-* Every action pinned to a full commit SHA; container images pinned by digest.
+* Every action pinned to a full commit SHA; container images pinned by digest; runner
+  images pinned to a release (`ubuntu-24.04`), so the reproducibility gate never meets a new
+  OS by surprise.
 * `permissions: {}` at workflow level, `contents: read` per job; only the `attest` job may
-  request an OIDC token (`id-token: write`), and it runs only on pushes to `main`.
+  request an OIDC token (`id-token: write`), it runs only on pushes to `main`, and only once
+  every other job has passed: a commit that fails any gate gets no provenance.
 * `persist-credentials: false` on every checkout; no `pull_request_target`; no caches (no
   cache poisoning across runs); no `github.event` expressions inside shell scripts.
 * zizmor (GitHub Actions static analysis) and gitleaks (full history) on every run.
@@ -244,7 +256,7 @@ Implemented ([`serving/`](../src/mlseal/serving)), tested in
   keep-alive, capped header size.
 * Validation errors say where and why, never echo the input; interactive docs and the
   OpenAPI schema are disabled; no debug mode; no server header; `nosniff`, `no-store` and a
-  deny-all CSP on every response.
+  deny-all CSP on every response, including the size and rate-limit rejections.
 
 Residual risk: the rate limiter is per process. Volumetric attacks belong to the gateway.
 
@@ -255,7 +267,7 @@ Exfiltration via ML Inference API (.000, .001, .002), AML.T0040 ML Model Inferen
 
 Implemented, as friction rather than prevention: probabilities rounded to three decimals,
 rate and batch limits, and access logs that count instances and flagged predictions per
-request (without payloads) so scraping is visible.
+request (without payloads) and record every throttled (429) request, so scraping is visible.
 
 Residual risk: with 30 ternary inputs and label access, a patient client can still
 approximate the model. Here model and data are public anyway; a confidential model would add
@@ -274,16 +286,16 @@ reputation feeds).
 
 *CWE-532*
 
-Implemented: JSON logs with request id, path, status, latency and counts; no request body,
-no query string, no client IP. A test sends a canary value and checks it never reaches the
-emitted log lines.
+Implemented: one JSON access-log line per response, rejections included, with request id,
+path, status, latency and counts; no request body, no query string, no client IP. A test
+sends a canary value and checks it never reaches the emitted log lines.
 
 ### T12 Compromise of the running container
 
 *SSDF PW.9 (secure defaults)*
 
 Implemented ([`Dockerfile`](../Dockerfile)): slim base pinned by digest, multi-stage build,
-hash-checked wheels only, no pip in the runtime virtualenv, non-root UID 10001, works with a
+hash-checked wheels only, no pip anywhere in the image, non-root UID 10001, works with a
 read-only root filesystem and all capabilities dropped (`--cap-drop ALL`,
 `no-new-privileges`, pids and memory limits in `make docker-run` and CI), bundle and key
 mounted read-only, an allowlist `.dockerignore` so keys and bundles can never enter a layer,
@@ -377,8 +389,13 @@ checks). Governance functions are out of scope for a single repository.
 ## Verifying a release
 
 ```bash
+# Local build, local key
 mlseal verify --bundle build/bundle --public-key runtime/keys/signing.pub
-gh attestation verify release/bundle/model.json --repo hugo-kte/secure-mlops-pipeline
+# CI build: the attested manifest pins every bundle file; check who produced it, from where
+gh attestation verify release/bundle/manifest.dsse.json --repo hugo-kte/secure-mlops-pipeline \
+  --signer-workflow hugo-kte/secure-mlops-pipeline/.github/workflows/ci.yml \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+mlseal verify --bundle release/bundle --public-key release/signing.pub
 ```
 
 ## Not covered (next steps)
