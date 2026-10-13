@@ -97,12 +97,52 @@ def test_export_parity_is_a_gate(trained, trusted_cfg):
     assert "export_parity" in _names(run_gates(drifted, trusted_cfg.gates, None), False)
 
 
+def _reproducible(fresh, committed, cfg):
+    results = run_gates(fresh, cfg.gates, committed, expect_reproducible=True)
+    return next(r for r in results if r.name == "reproducible")
+
+
 def test_reproducibility_gate(trained, trusted_cfg):
-    same = run_gates(trained.metrics, trusted_cfg.gates, trained.metrics, expect_reproducible=True)
-    assert "reproducible" in _names(same, True)
-    other = copy.deepcopy(trained.metrics)
-    other["test"]["metrics"]["roc_auc"] += 1e-4
-    results = run_gates(other, trusted_cfg.gates, trained.metrics, expect_reproducible=True)
-    assert "reproducible" in _names(results, False)
+    assert _reproducible(trained.metrics, trained.metrics, trusted_cfg).passed
     no_baseline = run_gates(trained.metrics, trusted_cfg.gates, None, expect_reproducible=True)
     assert "reproducible" in _names(no_baseline, False)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("test", "metrics", "roc_auc"),
+        ("test", "ci95", "f1", 0),
+        ("test", "confusion", "fp"),
+        ("selection", "candidates", 0, "cv", "roc_auc", "mean"),
+        ("duplicates_effect", "naive", "accuracy", "mean"),
+        ("curves", "selected", "roc", "tpr", 1),
+        ("data", "test_rows"),
+    ],
+)
+def test_reproducibility_gate_covers_the_whole_report(trained, trusted_cfg, path):
+    """A stale or hand-edited interval, count or figure input fails, not just a metric."""
+    edited = copy.deepcopy(trained.metrics)
+    *parents, last = path
+    node = edited
+    for key in parents:
+        node = node[key]
+    node[last] += 1e-4
+    result = _reproducible(edited, trained.metrics, trusted_cfg)
+    assert not result.passed
+    where = "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in path).lstrip(".")
+    assert f"at {where} " in result.detail
+
+
+def test_reproducibility_gate_ignores_provenance_but_not_the_data(trained, trusted_cfg):
+    elsewhere = copy.deepcopy(trained.metrics)  # another machine, commit or OS
+    elsewhere["materials"]["source"]["commit"] = "0" * 40
+    elsewhere["environment"]["platform"] = "Linux-x86_64"
+    elsewhere["model"]["sha256"] = "f" * 64
+    assert _reproducible(elsewhere, trained.metrics, trusted_cfg).passed
+    other_data = copy.deepcopy(trained.metrics)
+    other_data["materials"]["dataset"]["sha256"] = "0" * 64
+    assert not _reproducible(other_data, trained.metrics, trusted_cfg).passed
+    missing = copy.deepcopy(trained.metrics)
+    del missing["duplicates_effect"]["grouped"]
+    assert not _reproducible(missing, trained.metrics, trusted_cfg).passed

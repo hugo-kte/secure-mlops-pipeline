@@ -7,14 +7,59 @@ a reviewed commit, so a metric change is always visible in a pull request diff.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from mlseal.config import GatePolicy
-from mlseal.metrics import METRICS
 
 EXPORT_TOLERANCE = 1e-9
 REPRODUCIBILITY_TOLERANCE = 1e-6
+# Report fields a faithful retrain on another machine or commit need not match: provenance,
+# the software environment, and the model file's exact bytes (tied splits can resolve
+# differently in the last bit across operating systems; predictions and metrics still agree).
+NOT_REPRODUCED = ("materials", "environment", "model.sha256", "model.bytes")
+_MISSING = object()
+
+
+def _leaves(obj: Any, path: str = "") -> Iterator[tuple[str, Any]]:
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            yield from _leaves(value, f"{path}.{key}" if path else str(key))
+    elif isinstance(obj, list):
+        for i, value in enumerate(obj):
+            yield from _leaves(value, f"{path}[{i}]")
+    else:
+        yield path, obj
+
+
+def _compared(path: str) -> bool:
+    return not any(path == p or path.startswith((f"{p}.", f"{p}[")) for p in NOT_REPRODUCED)
+
+
+def _difference(a: Any, b: Any) -> float:
+    numbers = all(isinstance(v, int | float) and not isinstance(v, bool) for v in (a, b))
+    if numbers:
+        delta = abs(a - b)
+        return 0.0 if a == b else (math.inf if math.isnan(delta) else float(delta))
+    return 0.0 if type(a) is type(b) and a == b else math.inf
+
+
+def report_drift(fresh: dict[str, Any], committed: dict[str, Any]) -> tuple[float, str]:
+    """Largest difference between two metrics reports over every compared value, and where.
+
+    Numbers differ by their absolute difference. A changed string, type or structure (a value
+    present on one side only) is an infinite difference.
+    """
+    a = {path: v for path, v in _leaves(fresh) if _compared(path)}
+    b = {path: v for path, v in _leaves(committed) if _compared(path)}
+    worst, where = 0.0, ""
+    for path in sorted(a.keys() | b.keys()):
+        delta = _difference(a.get(path, _MISSING), b.get(path, _MISSING))
+        if delta > worst:
+            worst, where = delta, path
+    return worst, where
 
 
 @dataclass(frozen=True)
@@ -66,18 +111,20 @@ def run_gates(
             )
         )
     if expect_reproducible:
-        worst = max(METRICS, key=lambda m: abs(test[m] - base[m]))
-        delta = abs(test[worst] - base[worst])
+        # Every value of the report, not only the headline metrics: intervals, counts, the
+        # selection table and the figures' data cannot be stale or edited by hand either.
+        delta, where = report_drift(metrics, baseline)
         same_data = (
             metrics["materials"]["dataset"]["sha256"]
             == (baseline["materials"]["dataset"]["sha256"])
         )
+        drift = "every value identical" if delta == 0 else f"max |Δ| {delta:.1e} at {where}"
         results.append(
             GateResult(
                 "reproducible",
                 delta <= REPRODUCIBILITY_TOLERANCE and same_data,
-                f"retrained metrics match the committed report "
-                f"(max |Δ| {delta:.1e} on {worst}, same dataset digest: {same_data})",
+                f"retrain vs the committed report: {drift} "
+                f"(tolerance {REPRODUCIBILITY_TOLERANCE:.0e}); same dataset digest: {same_data}",
             )
         )
     return results

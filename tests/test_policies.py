@@ -1,6 +1,7 @@
 """Policy as code: properties of the repository itself that must not silently regress."""
 
 import ast
+import json
 import os
 import re
 import subprocess
@@ -11,6 +12,7 @@ import pytest
 import yaml
 
 from conftest import ROOT
+from mlseal.modelcard import render_model_card
 
 SRC = ROOT / "src" / "mlseal"
 # Modules that load or deserialise objects (directly or through pickle) and the heavy
@@ -125,6 +127,15 @@ def test_gitignore_is_anchored():
         assert f"/{directory}/" in lines
     assert "data/" not in lines and "data" not in lines  # the dataset is committed
     assert "*.key" in lines
+
+
+def test_committed_model_card_is_generated_from_the_committed_reports():
+    """The CI gate re-derives reports/metrics.json; the card must follow from it untouched."""
+    reports = ROOT / "reports"
+    metrics = json.loads((reports / "metrics.json").read_text(encoding="utf-8"))
+    validation = json.loads((reports / "data_validation.json").read_text(encoding="utf-8"))
+    card = (reports / "MODEL_CARD.md").read_text(encoding="utf-8")
+    assert card == render_model_card(metrics, validation)
 
 
 def test_no_private_key_in_the_source_tree():
