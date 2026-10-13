@@ -148,6 +148,7 @@ def test_minimal_valid_tree_loads_and_predicts(model_dict):
         b'{"format": "mlseal.model/v1", "threshold": Infinity}',
         b"\x80\x04\x95\x00",  # a pickle header is just invalid JSON here
         b"[" * 100_000,
+        b'{"format": "mlseal.model/v1", "threshold": ' + b"1" * 5000 + b"}",  # int too long
         "﻿{}".encode(),
     ],
 )

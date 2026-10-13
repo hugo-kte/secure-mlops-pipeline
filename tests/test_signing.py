@@ -99,6 +99,24 @@ def test_symlinked_subject_is_refused(bundle_copy, trusted, tmp_path):
         verify_bundle(bundle_copy, trusted)
 
 
+@pytest.mark.parametrize("make", [os.mkdir, os.mkfifo], ids=["directory", "fifo"])
+def test_subject_that_is_not_a_regular_file_is_refused(bundle_copy, trusted, make):
+    (bundle_copy / "gates.json").unlink()
+    make(bundle_copy / "gates.json")  # a FIFO must not block verification either
+    with pytest.raises(VerificationError, match=r"gates\.json is not a regular file"):
+        verify_bundle(bundle_copy, trusted)
+
+
+@pytest.mark.parametrize("extra", ["model.pkl", ".hidden", "sub/"])
+def test_files_not_covered_by_the_manifest_are_refused(bundle_copy, trusted, extra):
+    if extra.endswith("/"):
+        (bundle_copy / extra).mkdir()
+    else:
+        (bundle_copy / extra).write_bytes(b"not signed")  # e.g. a planted second model
+    with pytest.raises(VerificationError, match="not covered by the signed manifest"):
+        verify_bundle(bundle_copy, trusted)
+
+
 def _rewrite_statement(bundle, keys: Keys, mutate):
     """Re-sign a modified statement with the trusted key: checks beyond the signature."""
     env = json.loads((bundle / ENVELOPE_NAME).read_text())
@@ -118,6 +136,8 @@ def _rewrite_statement(bundle, keys: Keys, mutate):
         (lambda s: s.update(subject=[x for x in s["subject"] if x["name"] != "model.json"]),
          "does not cover model.json"),
         (lambda s: s.update(subject=[]), "no subjects"),
+        (lambda s: s["subject"][0].update(digest=["sha256"]), "no valid sha256"),
+        (lambda s: s["subject"][0].update(digest={"sha256": "é" * 64}), "no valid sha256"),
     ],
 )  # fmt: skip
 def test_signed_but_invalid_statements_are_refused(bundle_copy, keys, trusted, mutate, message):
@@ -151,6 +171,7 @@ def test_payload_type_is_bound_into_the_signature(keys, trusted):
         b'{"payloadType": "application/vnd.in-toto+json", "payload": "***", "signatures": [{}]}',
         b'{"payload": "e30=", "payload": "e30=", "payloadType": "x", "signatures": []}',
         b"not json",
+        b'{"payload": "", "payloadType": "x", "signatures": [' + b"1" * 5000 + b"]}",
     ],
 )
 def test_malformed_envelopes_are_refused(raw, trusted):

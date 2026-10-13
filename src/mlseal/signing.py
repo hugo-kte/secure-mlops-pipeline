@@ -13,7 +13,8 @@ Key handling
 
 Verification is all-or-nothing: a trusted signature over the exact envelope payload, then the
 SHA-256 of every subject file, read once into memory so the bytes that were checked are the
-bytes that get parsed (no time-of-check/time-of-use gap).
+bytes that get parsed (no time-of-check/time-of-use gap). A bundle may hold nothing but the
+envelope and the files it signs: an unsigned extra file is refused, not ignored.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import hmac
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,7 @@ ENVELOPE_NAME = "manifest.dsse.json"
 MAX_ENVELOPE_BYTES = 1024 * 1024
 MAX_SUBJECT_BYTES = 32 * 1024 * 1024
 _SUBJECT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
 class VerificationError(RuntimeError):
@@ -132,7 +135,7 @@ def _strict_json(data: bytes, what: str) -> Any:
 
     try:
         return json.loads(data.decode("utf-8"), object_pairs_hook=no_dupes)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    except (ValueError, RecursionError) as exc:  # bad UTF-8 or JSON, oversized integer
         raise VerificationError(f"{what}: not valid JSON") from exc
 
 
@@ -191,13 +194,20 @@ def sign_bundle(bundle_dir: Path, statement: dict[str, Any], key: Ed25519Private
 
 
 def _read_regular_file(path: Path, limit: int) -> bytes:
-    # O_NOFOLLOW: a subject replaced by a symlink is refused, not followed.
+    # O_NOFOLLOW: a subject replaced by a symlink is refused, not followed. O_NONBLOCK: a
+    # FIFO cannot stall startup; it, a directory or a device is refused once opened.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, flags)
     except OSError as exc:
         raise VerificationError(f"cannot open {path.name}: {exc.strerror}") from exc
-    with os.fdopen(fd, "rb") as fh:
-        data = fh.read(limit + 1)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise VerificationError(f"{path.name} is not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            data = fh.read(limit + 1)
+    finally:
+        os.close(fd)
     if len(data) > limit:
         raise VerificationError(f"{path.name} exceeds {limit} bytes")
     return data
@@ -221,16 +231,22 @@ def verify_bundle(bundle_dir: Path, trusted: list[Ed25519PublicKey]) -> Verified
 
     files: dict[str, bytes] = {}
     for subject in subjects:
-        name = subject.get("name") if isinstance(subject, dict) else None
-        digest = subject.get("digest", {}).get("sha256") if isinstance(subject, dict) else None
+        subject = subject if isinstance(subject, dict) else {}
+        name, digests = subject.get("name"), subject.get("digest")
+        digest = digests.get("sha256") if isinstance(digests, dict) else None
         if not isinstance(name, str) or not _SUBJECT_NAME.match(name) or name in files:
             raise VerificationError(f"statement: invalid subject name {name!r}")
-        if not isinstance(digest, str):
-            raise VerificationError(f"statement: no sha256 for {name}")
+        if not isinstance(digest, str) or not _SHA256_HEX.match(digest):
+            raise VerificationError(f"statement: no valid sha256 for {name}")
         content = _read_regular_file(bundle_dir / name, MAX_SUBJECT_BYTES)
         if not hmac.compare_digest(hashlib.sha256(content).hexdigest(), digest):
             raise VerificationError(f"digest mismatch for {name}: file was modified")
         files[name] = content
     if "model.json" not in files:
         raise VerificationError("statement does not cover model.json")
+    # Nothing unsigned may ride along: whoever consumes a verified bundle must be able to
+    # trust every file in it, not only the ones this server happens to load.
+    unsigned = sorted(set(os.listdir(bundle_dir)) - set(files) - {ENVELOPE_NAME})
+    if unsigned:
+        raise VerificationError(f"files not covered by the signed manifest: {unsigned}")
     return VerifiedBundle(statement=statement, keyid=keyid, files=files)

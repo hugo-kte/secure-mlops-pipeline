@@ -227,9 +227,10 @@ def verify(
 
     keys = public_key or [KEYS / "signing.pub"]
     try:
-        verified = verify_bundle(bundle, [load_public_key(p.read_bytes()) for p in keys])
+        trusted = [load_public_key(p.read_bytes()) for p in keys]
+        verified = verify_bundle(bundle, trusted)
         model = modelfile.loads(verified.files["model.json"])
-    except (VerificationError, modelfile.ModelFormatError) as exc:
+    except (OSError, TypeError, ValueError, VerificationError) as exc:  # incl. ModelFormatError
         raise _fail(str(exc)) from exc
     pred = verified.statement["predicate"]
     table = Table(title="Verified release", title_justify="left", show_header=False)

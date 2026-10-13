@@ -185,7 +185,9 @@ def loads(data: bytes) -> Model:
             object_pairs_hook=_no_duplicate_keys,
             parse_constant=_reject_constant,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    except ModelFormatError:
+        raise
+    except (ValueError, RecursionError) as exc:  # bad UTF-8 or JSON, oversized integer
         raise ModelFormatError(f"not a JSON model file: {exc}") from exc
 
     if not isinstance(obj, dict) or obj.get("format") != FORMAT:

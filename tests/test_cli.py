@@ -78,6 +78,14 @@ def test_gate_command_fails_below_a_floor(tmp_path, unsigned):
     assert json.loads((unsigned / "gates.json").read_text())["passed"] is False
 
 
+def test_verify_fails_cleanly_without_a_usable_public_key(signed_bundle, tmp_path):
+    (tmp_path / "junk.pub").write_text("not a key")
+    for key in (tmp_path / "missing.pub", tmp_path / "junk.pub"):
+        result = run("verify", "-b", signed_bundle, "--public-key", key, ok=False)
+        assert "FAILED" in result.output
+        assert not isinstance(result.exception, (OSError, ValueError))  # no traceback
+
+
 def test_promote_refuses_a_failed_bundle(unsigned, tmp_path):
     (unsigned / "gates.json").write_text(json.dumps({"passed": False, "results": []}))
     run("promote", "-b", unsigned, "--reports", tmp_path / "r", ok=False)
