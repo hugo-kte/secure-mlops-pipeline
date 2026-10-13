@@ -1,0 +1,6 @@
+# Allowlist: only what the serving image needs enters the build context, so local keys,
+# bundles, virtualenvs and git metadata can never leak into a layer.
+*
+!requirements/serve.txt
+!src/mlseal/
+**/__pycache__

@@ -1,0 +1,44 @@
+# MLSeal pipeline configuration. Relative paths are resolved from the repository root.
+seed: 42
+
+data:
+  path: data/phishing_websites.arff
+  reference_profile: configs/reference_profile.json
+  upstream:   # `mlseal data-provenance` re-downloads and compares (see data/README.md)
+    url: https://archive.ics.uci.edu/static/public/327/phishing+websites.zip
+    member: Training Dataset.arff
+    archive_sha256: 514f582cb44cba17251baf1d59f64cddff16efa2b644d091ce8d2a1e8d492940
+  policy:
+    # SHA-256 of "Training Dataset.arff" from the UCI archive (see data/README.md).
+    # Any change to the file, however small, stops the pipeline here.
+    sha256: 3bcf93b1612306537ee2737751f1bac185b2a77886ab376644c3bf0c7f7cb3e6
+    min_rows: 10000
+    max_rows: 50000
+    phishing_share: [0.35, 0.55]   # 0.443 in the reviewed file
+    max_duplicate_share: 0.60      # 0.477: high, handled by de-duplication
+    max_conflict_share: 0.02       # vectors seen with both labels; label flipping raises it
+    max_feature_psi: 0.10          # population stability index vs the reviewed profile
+
+split:
+  test_size: 0.2
+  cv_folds: 5
+
+model:
+  name: phishing-gbm
+  version: 1.0.0
+  selection_metric: roc_auc
+  candidates:
+    - {kind: logistic_regression, C: 1.0}
+    - {kind: gradient_boosting, n_estimators: 200, max_depth: 3, learning_rate: 0.1}
+    - {kind: gradient_boosting, n_estimators: 300, max_depth: 4, learning_rate: 0.1}
+    - {kind: gradient_boosting, n_estimators: 400, max_depth: 5, learning_rate: 0.05}
+
+evaluation:
+  threshold: 0.5
+  bootstrap: 2000
+
+gates:
+  # Floors on the de-duplicated hold-out test set.
+  minimum: {roc_auc: 0.98, f1: 0.93, recall: 0.92}
+  # Largest acceptable drop versus reports/metrics.json (the last promoted model).
+  max_regression: {roc_auc: 0.005, f1: 0.01, recall: 0.015}

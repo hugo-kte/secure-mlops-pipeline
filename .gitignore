@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+/dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Pipeline output and local signing keys (anchored to the repo root)
+/build/
+/runtime/
+/logs/
+
+# Private key material must never be committed, wherever it lands
+*.key
+*.pem
+
+# Editors / OS / local tooling
+.DS_Store
+.idea/
+.vscode/
+.claude/

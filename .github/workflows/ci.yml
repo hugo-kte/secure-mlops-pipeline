@@ -1,0 +1,235 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Deny everything by default; each job asks for the least it needs.
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every action is pinned to a full commit SHA (tags can be moved; commits cannot).
+# Caches are disabled: nothing a pull request writes can poison a later build.
+
+jobs:
+  test:
+    name: Lint & test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.28"
+          python-version: ${{ matrix.python-version }}
+          enable-cache: false
+      - name: Install from uv.lock (every package hash-verified)
+        run: uv sync --locked --extra dev
+      - name: Lint (ruff, including the Bandit security rules)
+        run: |
+          uv run --no-sync ruff check src tests
+          uv run --no-sync ruff format --check src tests
+      - name: Test
+        run: uv run --no-sync pytest --cov --cov-report=term-missing
+      - name: CLI smoke test
+        run: |
+          uv run --no-sync mlseal --help
+          uv run --no-sync python -m mlseal validate
+
+  pipeline:
+    name: Train, gate, scan, sign, verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.28"
+          python-version: "3.12"
+          enable-cache: false
+      - run: uv sync --locked --extra dev
+      - name: Data gate (pinned SHA-256, schema, domains, balance, duplicates, conflicts, drift)
+        run: uv run --no-sync mlseal validate
+      - name: Train and evaluate (seeded, de-duplicated hold-out)
+        run: uv run --no-sync mlseal train
+      - name: Quality gates (floors, regression and reproduction of reports/metrics.json)
+        run: uv run --no-sync mlseal gate --expect-reproducible
+      - name: Model file scan (a release bundle holds no pickle)
+        run: uv run --no-sync mlseal scan build/bundle --forbid-pickle
+      - name: Sign with an ephemeral key (generated here, never stored)
+        run: |
+          uv run --no-sync mlseal keygen --out-dir "$RUNNER_TEMP/keys"
+          uv run --no-sync mlseal sign --key "$RUNNER_TEMP/keys/signing.key"
+          cp "$RUNNER_TEMP/keys/signing.pub" build/signing.pub
+          rm -f "$RUNNER_TEMP/keys/signing.key"
+      - name: Verify, and prove that a tampered bundle is refused
+        run: |
+          uv run --no-sync mlseal verify --public-key build/signing.pub
+          cp -r build/bundle "$RUNNER_TEMP/tampered"
+          sed -i 's/"learning_rate":0.1/"learning_rate":0.2/' "$RUNNER_TEMP/tampered/model.json"
+          if uv run --no-sync mlseal verify --bundle "$RUNNER_TEMP/tampered" \
+              --public-key build/signing.pub; then
+            echo "::error::a tampered bundle passed verification"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-bundle
+          path: |
+            build/bundle/
+            build/signing.pub
+          if-no-files-found: error
+          retention-days: 30
+
+  attest:
+    name: Attest build provenance (Sigstore, keyless)
+    needs: pipeline
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC token for Sigstore keyless signing; no long-lived key exists
+      attestations: write # store the signed provenance in the repository's attestation API
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: release
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/bundle/model.json
+            release/bundle/manifest.dsse.json
+            release/bundle/metrics.json
+            release/bundle/model_card.md
+
+  supply-chain:
+    name: Supply chain (lock, vulnerability audit, SBOM, workflow lint)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.11.28"
+          python-version: "3.12"
+          enable-cache: false
+      - name: uv.lock matches pyproject.toml
+        run: uv lock --check
+      - name: requirements/serve.txt (Docker image) matches uv.lock
+        run: |
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt \
+            -o requirements/serve.txt
+          git diff --exit-code requirements/serve.txt
+      - run: uv sync --locked --extra audit
+      - name: Known-vulnerability audit of every locked package (pip-audit)
+        run: |
+          uv export --frozen --all-extras --no-emit-project --format requirements-txt \
+            -o "$RUNNER_TEMP/requirements-all.txt"
+          uv run --no-sync pip-audit --requirement "$RUNNER_TEMP/requirements-all.txt" \
+            --require-hashes --disable-pip --strict --progress-spinner off
+      - name: SBOM of the serving dependencies (CycloneDX)
+        run: |
+          uv run --no-sync cyclonedx-py requirements requirements/serve.txt \
+            --pyproject pyproject.toml --output-reproducible -o sbom.cdx.json
+      - name: GitHub Actions security lint (zizmor)
+        run: uv run --no-sync zizmor --offline .github/workflows
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          if-no-files-found: error
+
+  secrets:
+    name: Secret scan (gitleaks, full history)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks (container image pinned by digest)
+        run: |
+          docker run --rm -v "$PWD:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            git /repo --redact --verbose --exit-code 1
+
+  docker:
+    name: Container (build, hardened run, refuse a tampered bundle)
+    needs: pipeline
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: release
+      - name: Build (base image pinned by digest, hash-checked wheels)
+        run: docker build -t mlseal:ci .
+      - name: Serve the signed bundle (read-only root, no capabilities, non-root)
+        run: |
+          test "$(docker inspect -f '{{.Config.User}}' mlseal:ci)" = "10001:10001"
+          docker run -d --name api -p 127.0.0.1:8080:8080 --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --pids-limit 64 --memory 256m --health-interval 5s \
+            -v "$PWD/release/bundle:/models:ro" \
+            -v "$PWD/release/signing.pub:/keys/signing.pub:ro" mlseal:ci
+          for _ in $(seq 1 30); do curl -fs http://127.0.0.1:8080/readyz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8080/readyz
+          curl -fsS -X POST http://127.0.0.1:8080/v1/predict \
+            -H 'content-type: application/json' --data @examples/request.json
+          for _ in $(seq 1 20); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' api)" = healthy ] && exit 0
+            sleep 3
+          done
+          echo "::error::container never became healthy"; docker logs api; exit 1
+      - name: A tampered bundle stops the container at startup
+        run: |
+          cp -r release/bundle tampered
+          sed -i 's/"learning_rate":0.1/"learning_rate":0.2/' tampered/model.json
+          set +e
+          docker run --rm --read-only --cap-drop ALL -v "$PWD/tampered:/models:ro" \
+            -v "$PWD/release/signing.pub:/keys/signing.pub:ro" mlseal:ci > tampered.log 2>&1
+          code=$?
+          set -e
+          cat tampered.log
+          test "$code" -ne 0
+          grep -q "digest mismatch for model.json" tampered.log
+      - name: SBOM of the shipped image (Syft, CycloneDX)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: mlseal:ci
+          format: cyclonedx-json
+          output-file: image-sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-sbom
+          path: image-sbom.cdx.json
+          if-no-files-found: error
+      - name: Container logs
+        if: always()
+        run: docker logs api || true
