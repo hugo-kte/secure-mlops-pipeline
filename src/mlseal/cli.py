@@ -194,20 +194,16 @@ def sign(
     """Sign the bundle manifest, but only if every gate passed and the bundle holds no pickle."""
     from mlseal import modelfile
     from mlseal.provenance import BUNDLE_FILES, ProvenanceError, build_statement
-    from mlseal.scanner import scan_path
     from mlseal.signing import load_private_key, sign_bundle
 
     for name, label in (("data_validation.json", "data gate"), ("gates.json", "quality gates")):
         path = bundle / name
         if not path.is_file() or not json.loads(path.read_text(encoding="utf-8"))["passed"]:
             raise _fail(f"{label} did not pass; refusing to sign")
-    pickles = [r.path for r in scan_path(bundle) if r.is_pickle]
-    if pickles:
-        raise _fail(f"pickles, or files the scanner refused, in the bundle: {pickles}")
-    modelfile.loads((bundle / "model.json").read_bytes())  # never sign an unloadable model
     try:
-        statement = build_statement(bundle)
-    except ProvenanceError as exc:
+        statement = build_statement(bundle)  # runs the pickle scan it records
+        modelfile.loads((bundle / "model.json").read_bytes())  # never sign an unloadable model
+    except (ProvenanceError, modelfile.ModelFormatError) as exc:
         raise _fail(str(exc)) from exc
     envelope = sign_bundle(bundle, statement, load_private_key(key, _passphrase()))
     console.print(f"Signed {len(BUNDLE_FILES)} files -> [bold]{envelope}[/bold]")

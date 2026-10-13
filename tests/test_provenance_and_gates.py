@@ -1,5 +1,6 @@
 import copy
 import json
+import pickle
 import shutil
 
 import pytest
@@ -51,6 +52,20 @@ def test_statement_refuses_inputs_changed_since_training(tmp_path, trained):
     build_statement(bundle)  # consistent: fine
     data.write_bytes(DATA.read_bytes() + b"\n")  # the dataset moves on after training
     with pytest.raises(ProvenanceError, match="dataset changed since training"):
+        build_statement(bundle)
+
+
+@pytest.mark.parametrize("planted", ["pickle", "symlink"])
+def test_statement_records_only_a_pickle_scan_it_ran(tmp_path, trained, planted):
+    """The signed scan outcome is computed on the bundle itself; no caller can assert it."""
+    bundle = tmp_path / "bundle"
+    shutil.copytree(trained.bundle, bundle)
+    assert build_statement(bundle)["predicate"]["policy"]["pickle_scan"] == "clean"
+    if planted == "pickle":
+        (bundle / "weights.pkl").write_bytes(pickle.dumps({"weights": [1, 2]}))  # plain data
+    else:
+        (bundle / "notes.txt").symlink_to(tmp_path)  # cannot be scanned: refused, not skipped
+    with pytest.raises(ProvenanceError, match="pickles, or files the scanner refused"):
         build_statement(bundle)
 
 

@@ -2,7 +2,9 @@
 
 The statement is what gets signed (see `signing.py`). Subjects are the bundle files with
 their SHA-256; the predicate records the materials the model was built from (dataset, lock
-file, configuration, source commit), the builder, the evaluation and the gate outcomes.
+file, configuration, source commit), the builder, the evaluation and the gate outcomes. Each
+outcome is read from the bundle's own reports or, for the pickle scan, computed here: no
+caller can assert a result that was not produced.
 The envelope and statement formats are the ones Sigstore, SLSA and OpenSSF Model Signing
 use, so standard tooling can read them; the predicate itself is project-specific.
 """
@@ -74,10 +76,21 @@ def _check_material(name: str, recorded: dict[str, Any]) -> dict[str, Any]:
     return recorded
 
 
+def _pickle_scan(bundle_dir: Path) -> str:
+    """Scan the bundle here, so the signed outcome can only describe a scan that ran on it."""
+    from mlseal.scanner import scan_path  # lazy: the server imports this module, not scans
+
+    refused = [r.path for r in scan_path(bundle_dir) if r.is_pickle]
+    if refused:
+        raise ProvenanceError(f"pickles, or files the scanner refused, in the bundle: {refused}")
+    return "clean"
+
+
 def build_statement(bundle_dir: Path) -> dict[str, Any]:
     missing = [f for f in BUNDLE_FILES if not (bundle_dir / f).is_file()]
     if missing:
         raise ProvenanceError(f"bundle is incomplete, missing {missing}")
+    pickle_scan = _pickle_scan(bundle_dir)
     metrics = json.loads((bundle_dir / "metrics.json").read_text(encoding="utf-8"))
     gates = json.loads((bundle_dir / "gates.json").read_text(encoding="utf-8"))
     validation = json.loads((bundle_dir / "data_validation.json").read_text(encoding="utf-8"))
@@ -109,7 +122,7 @@ def build_statement(bundle_dir: Path) -> dict[str, Any]:
             "policy": {
                 "data_validation": "passed" if validation["passed"] else "failed",
                 "quality_gates": "passed" if gates["passed"] else "failed",
-                "pickle_scan": "clean",
+                "pickle_scan": pickle_scan,
             },
             "environment": metrics["environment"],
             "signed_at": datetime.now(UTC).isoformat(timespec="seconds"),
