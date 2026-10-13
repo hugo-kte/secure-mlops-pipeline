@@ -51,7 +51,8 @@ class AccessLog:
         request_id = uuid.uuid4().hex
         state = scope.setdefault("state", {})
         state["request_id"] = request_id
-        start, status = time.perf_counter(), 500  # 500 unless a response starts
+        start = time.perf_counter()
+        status: int | None = None  # stays None if the client leaves before any response
 
         async def send_with_headers(message: Message) -> None:
             nonlocal status
@@ -64,6 +65,9 @@ class AccessLog:
 
         try:
             await self.app(scope, receive, send_with_headers)
+        except Exception:
+            status = status or 500  # the server error handler outside answers 500
+            raise
         finally:
             self.logger.info(
                 "request",

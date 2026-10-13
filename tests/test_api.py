@@ -1,5 +1,6 @@
 """Hardened serving: strict schema, limits, quiet errors and logs, fail-closed startup."""
 
+import asyncio
 import json
 import logging
 
@@ -13,7 +14,7 @@ from mlseal.data import read_arff
 from mlseal.schema import FEATURE_NAMES
 from mlseal.serving import Settings, create_app
 from mlseal.serving.logs import JsonFormatter
-from mlseal.serving.middleware import RateLimit
+from mlseal.serving.middleware import AccessLog, RateLimit
 from mlseal.signing import VerificationError, generate_key, save_keypair
 
 ROWS = read_arff(DATA).X[:40]
@@ -177,6 +178,24 @@ def test_rejections_carry_the_security_headers_and_are_logged(signed_bundle, key
     assert [r.request_id for r in access] == [
         r.headers["x-request-id"] for r in (too_big, allowed, throttled)
     ]
+
+
+def test_access_log_status_when_the_app_fails_or_the_client_leaves(caplog):
+    async def fails(scope, receive, send):
+        raise RuntimeError("boom")
+
+    async def client_left(scope, receive, send):
+        return None  # e.g. BodySizeLimit after an http.disconnect: no response at all
+
+    async def run(app):
+        scope = {"type": "http", "method": "POST", "path": "/v1/predict", "headers": []}
+        await AccessLog(app, {}, logging.getLogger("mlseal.access"))(scope, None, None)
+
+    caplog.set_level(logging.INFO)
+    with pytest.raises(RuntimeError):
+        asyncio.run(run(fails))
+    asyncio.run(run(client_left))
+    assert [r.status for r in caplog.records if r.name == "mlseal.access"] == [500, None]
 
 
 def test_token_bucket_refills():
