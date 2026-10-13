@@ -130,10 +130,11 @@ flowchart LR
 
 **Reproducibility.** A retrain in a Linux container reproduced all 1,599 floating-point
 values of the macOS `metrics.json` exactly, and in CI the `reproducible` gate fails if a
-fresh retrain drifts from the committed report by more than 1e-6. The model file itself is
-not byte-identical across operating systems: tied splits resolve differently at the last
-floating-point bit. Its predictions still agree to 1e-15 on 200,000 random valid inputs, so
-the gate compares metrics, not file hashes.
+fresh retrain drifts from the committed report by more than 1e-6. On Linux the build was
+byte-identical across machines: a local container and the GitHub runner produced the same
+`model.json` (`sha256:b0d29188…`). Across operating systems it is not: tied splits resolve
+differently at the last floating-point bit, yet predictions agree to 1e-15 on 200,000 random
+valid inputs. The gate therefore compares metrics, not file hashes.
 
 ## Quickstart
 
@@ -166,6 +167,19 @@ mlseal promote           make the last run the new baseline (a reviewed commit)
 mlseal serve             verify, then serve
 mlseal data-provenance   re-download the UCI archive and compare with the pinned digest
 ```
+
+Verify a bundle built by CI (artifact `release-bundle` of a run on `main`):
+
+```bash
+gh run download <run-id> --repo hugo-kte/secure-mlops-pipeline -n release-bundle -D release
+gh attestation verify release/bundle/model.json --repo hugo-kte/secure-mlops-pipeline
+mlseal verify --bundle release/bundle --public-key release/signing.pub
+```
+
+The first check proves the file was built by this repository's workflow on `main` (SLSA
+provenance, Sigstore, transparency log); the second checks the signed manifest and every
+digest. The public key shipped with a CI bundle is ephemeral, so it only proves integrity
+within that run; long-lived trust comes from the attestation.
 
 API: `GET /healthz` (liveness), `GET /readyz` (bundle verified and loaded), `GET /v1/model`
 (verified digest, signer, commit, evaluation), `POST /v1/predict`. Server settings come from
