@@ -103,6 +103,14 @@ def test_only_the_attestation_job_can_mint_tokens(path):
     assert writers <= {"attest"}
 
 
+def test_gates_also_run_on_a_schedule_without_cancelling_main():
+    """A new advisory must fail the build even when nothing is pushed."""
+    doc, triggers = _load(ROOT / ".github" / "workflows" / "ci.yml")
+    assert triggers["schedule"], "a scheduled run re-checks main"
+    group = doc["concurrency"]["group"]
+    assert "github.run_id" in group, "a run on main is never cancelled by a newer one"
+
+
 @pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
 def test_provenance_is_attested_only_for_fully_green_builds(path):
     doc, _ = _load(path)

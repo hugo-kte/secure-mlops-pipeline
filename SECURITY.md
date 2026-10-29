@@ -21,7 +21,8 @@ Only the latest commit on `main` is maintained.
 * **Detection.** pip-audit checks every locked package against the PyPI and OSV advisory
   databases: the serving dependencies, but also the training stack and the dev and audit
   tools, because they all run in CI next to the signing step. It runs on every push and
-  pull request. A failing job blocks the release: the provenance attestation is only
+  pull request and once a week on `main`, so a new advisory fails the build even when
+  nothing is pushed. A failing job blocks the release: the provenance attestation is only
   produced when every job has passed.
 * **Cooldown.** uv resolves nothing uploaded in the 14 days before the lock was cut
   (`exclude-newer` in [`pyproject.toml`](pyproject.toml)), so a hijacked release has time

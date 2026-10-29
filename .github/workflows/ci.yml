@@ -4,12 +4,19 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Weekly on main: an advisory published after the last push still fails the build.
+  # Every gate runs, not only the audit; only pushes to main are attested.
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
 
 # Deny everything by default; each job asks for the least it needs.
 permissions: {}
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # A new push to a pull request cancels its previous run. Runs on main (pushes, the weekly
+  # audit) are never cancelled, so every commit on main gets a complete run.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 # Every action is pinned to a full commit SHA (tags can be moved; commits cannot), and the
