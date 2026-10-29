@@ -41,8 +41,64 @@ packages = ["src/mlseal"]
 # Dependency cooldown: ignore anything published in the two weeks before the lock was cut,
 # so a freshly compromised release cannot slip in. Move the date forward deliberately.
 exclude-newer = "2026-09-29T00:00:00Z"
-# Reviewed exception: ruff is pinned portfolio-wide (dev-only tool, never shipped).
-exclude-newer-package = { ruff = "2026-10-10T00:00:00Z" }
+
+# Cooldown exceptions, under the rule in SECURITY.md. Each admits a single release (its
+# date is the UTC midnight after that release's last upload), is justified below and is
+# deleted once the cooldown date passes it; tests/test_policies.py enforces all three.
+[tool.uv.exclude-newer-package]
+ruff = "2026-10-10T00:00:00Z"
+certifi = "2026-10-21T00:00:00Z"
+filelock = "2026-10-18T00:00:00Z"
+msgpack = "2026-09-30T00:00:00Z"
+pillow = "2026-10-17T00:00:00Z"
+
+# Why each exception exists. kind: "security-fix" (the smallest release that fixes the
+# advisories pip-audit reported) or "tool-pin" (a reviewed version pin of a dev-only tool).
+# provenance: the PyPI publish attestation (PEP 740) checked for the admitted release.
+[tool.mlseal.cooldown-exceptions.ruff]
+kind = "tool-pin"
+version = "0.17.0"
+reason = "ruff is pinned portfolio-wide; dev-only, never shipped"
+
+[tool.mlseal.cooldown-exceptions.certifi]
+kind = "security-fix"
+version = "2026.10.19"
+provenance = "github.com/certifi/python-certifi release.yml"
+advisories = ["PYSEC-2026-4320"]
+
+[tool.mlseal.cooldown-exceptions.filelock]
+kind = "security-fix"
+version = "4.2.1"
+provenance = "github.com/tox-dev/filelock release.yaml"
+advisories = [
+    "CVE-2026-112907", "CVE-2026-112908", "CVE-2026-112909", "CVE-2026-112910",
+    "CVE-2026-112911", "CVE-2026-112912", "CVE-2026-112913", "CVE-2026-112915",
+    "CVE-2026-112934", "CVE-2026-112935", "CVE-2026-112936", "CVE-2026-112938",
+    "CVE-2026-112939", "CVE-2026-112940",
+]
+
+[tool.mlseal.cooldown-exceptions.msgpack]
+kind = "security-fix"
+version = "1.2.3"
+provenance = "github.com/msgpack/msgpack-python wheel.yml"
+advisories = ["CVE-2026-114613"]
+
+[tool.mlseal.cooldown-exceptions.pillow]
+kind = "security-fix"
+version = "13.0.0"
+provenance = "github.com/python-pillow/Pillow wheels.yml"
+advisories = [
+    "CVE-2026-96638", "CVE-2026-96640", "CVE-2026-96778", "CVE-2026-112390", "CVE-2026-112391",
+    "CVE-2026-112393", "CVE-2026-112395", "CVE-2026-112399", "CVE-2026-112400",
+    "CVE-2026-112401", "CVE-2026-112404", "CVE-2026-112406", "CVE-2026-112891",
+    "CVE-2026-112892", "CVE-2026-112893", "CVE-2026-112894", "CVE-2026-112895",
+    "CVE-2026-112897", "CVE-2026-112899", "CVE-2026-112900", "GHSA-78g4-xqwv-q3g8",
+    "PYSEC-2026-4326", "PYSEC-2026-4327", "PYSEC-2026-4328", "PYSEC-2026-4329",
+    "PYSEC-2026-4330", "PYSEC-2026-4331", "PYSEC-2026-4332", "PYSEC-2026-4333",
+    "PYSEC-2026-4334", "PYSEC-2026-4335", "PYSEC-2026-4336", "PYSEC-2026-4337",
+    "PYSEC-2026-4338", "PYSEC-2026-4339", "PYSEC-2026-4340", "PYSEC-2026-4341",
+    "PYSEC-2026-4342", "PYSEC-2026-4343",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

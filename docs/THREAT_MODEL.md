@@ -192,10 +192,14 @@ Implemented:
 * The image installs `requirements/serve.txt` with `--require-hashes --only-binary=:all:`:
   no unpinned package, no sdist, no build script executed.
 * A 14-day dependency cooldown (`exclude-newer` in `pyproject.toml`) keeps freshly published
-  (possibly hijacked) releases out; the one exception (the portfolio-wide ruff pin) is
-  documented in place.
-* `pip-audit` checks every locked package against the PyPI and OSV advisory databases on
-  every CI run.
+  (possibly hijacked) releases out. A package may skip it only under a written, tested rule
+  ([`SECURITY.md`](../SECURITY.md)): the smallest release that fixes reported advisories
+  and carries a PyPI publish attestation (or a reviewed dev-tool pin), admitted alone, with
+  its justification recorded next to it, and deleted once the cooldown passes it.
+* `pip-audit` checks every locked package (runtime, training, dev and audit tools) against
+  the PyPI and OSV advisory databases on every CI run. On 2026-10-29 it failed the build on
+  56 newly published advisories in four build tools; the fix and the exception rule are
+  recorded in the [advisory log](../SECURITY.md#advisory-log).
 * CycloneDX SBOMs: the serving dependencies (`cyclonedx-py`) and the built image (Syft).
 * Minimal runtime: 23 packages in the image, no scikit-learn, scipy, pandas or joblib, and no
   pip.

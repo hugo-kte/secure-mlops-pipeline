@@ -6,6 +6,8 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -109,6 +111,96 @@ def test_provenance_is_attested_only_for_fully_green_builds(path):
             needs = job.get("needs", [])
             needs = {needs} if isinstance(needs, str) else set(needs)
             assert needs == set(doc["jobs"]) - {name}, f"{name} must wait for every other job"
+
+
+# --- dependency cooldown -------------------------------------------------------------------
+
+
+def _utc(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _toml(name: str) -> dict:
+    return tomllib.loads((ROOT / name).read_text(encoding="utf-8"))
+
+
+def cooldown_violations(pyproject: dict, lock: dict) -> list[str]:
+    """Breaches of the cooldown exception rule (SECURITY.md); an empty list means compliant.
+
+    Every package that skips the cooldown must be justified, admit exactly the release it
+    names (the exception ends at the UTC midnight after that release's last upload), and be
+    deleted once the cooldown date has moved past it.
+    """
+    uv = pyproject["tool"]["uv"]
+    cutoff = _utc(uv["exclude-newer"])
+    exceptions = uv.get("exclude-newer-package", {})
+    reasons = pyproject["tool"].get("mlseal", {}).get("cooldown-exceptions", {})
+    problems = [f"{name}: no justification" for name in exceptions.keys() - reasons.keys()]
+    problems += [f"{name}: justified but not excepted" for name in reasons.keys() - exceptions]
+    if lock["options"].get("exclude-newer-package", {}) != exceptions:
+        problems.append("uv.lock was resolved with other exceptions")
+    for name in exceptions.keys() & reasons.keys():
+        why, until = reasons[name], _utc(exceptions[name])
+        if until <= cutoff:
+            problems.append(f"{name}: the cooldown date has passed this exception; delete it")
+        if why.get("kind") == "security-fix":
+            if not (why.get("advisories") and why.get("provenance")):
+                problems.append(f"{name}: a security fix names its advisories and provenance")
+        elif not (why.get("kind") == "tool-pin" and why.get("reason")):
+            problems.append(f"{name}: kind must be security-fix or tool-pin (with a reason)")
+        locked = [p for p in lock["package"] if p["name"] == name]
+        if [p["version"] for p in locked] != [why.get("version")]:
+            problems.append(f"{name}: the lock holds another release than {why.get('version')}")
+            continue
+        files = [*locked[0].get("wheels", []), *filter(None, [locked[0].get("sdist")])]
+        last_upload = max(_utc(f["upload-time"]) for f in files)
+        day_after = datetime.combine(last_upload.date() + timedelta(days=1), datetime.min.time())
+        if until != day_after.replace(tzinfo=UTC):
+            problems.append(f"{name}: the exception must end at {day_after:%Y-%m-%dT%H:%M:%SZ}")
+    return problems
+
+
+def test_cooldown_exceptions_follow_the_rule():
+    assert cooldown_violations(_toml("pyproject.toml"), _toml("uv.lock")) == []
+
+
+def _widen(pyproject, lock):
+    for doc in (pyproject["tool"]["uv"], lock["options"]):
+        doc["exclude-newer-package"]["pillow"] = "2026-10-30T00:00:00Z"
+
+
+def _move_cooldown(pyproject, lock):
+    pyproject["tool"]["uv"]["exclude-newer"] = "2026-10-20T00:00:00Z"
+
+
+def _unjustified(pyproject, lock):
+    for doc in (pyproject["tool"]["uv"], lock["options"]):
+        doc["exclude-newer-package"]["numpy"] = "2026-10-21T00:00:00Z"
+
+
+def _no_advisories(pyproject, lock):
+    pyproject["tool"]["mlseal"]["cooldown-exceptions"]["msgpack"]["advisories"] = []
+
+
+def _other_release(pyproject, lock):
+    next(p for p in lock["package"] if p["name"] == "certifi")["version"] = "2026.10.23"
+
+
+@pytest.mark.parametrize(
+    ("breach", "message"),
+    [
+        (_widen, "pillow: the exception must end at 2026-10-17T00:00:00Z"),
+        (_move_cooldown, "filelock: the cooldown date has passed this exception"),
+        (_unjustified, "numpy: no justification"),
+        (_no_advisories, "msgpack: a security fix names its advisories"),
+        (_other_release, "certifi: the lock holds another release"),
+    ],
+    ids=["widened", "expired", "unjustified", "no-advisories", "other-release"],
+)
+def test_cooldown_rule_catches_breaches(breach, message):
+    pyproject, lock = _toml("pyproject.toml"), _toml("uv.lock")
+    breach(pyproject, lock)
+    assert any(p.startswith(message) for p in cooldown_violations(pyproject, lock))
 
 
 # --- container ------------------------------------------------------------------------------
